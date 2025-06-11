@@ -1,0 +1,142 @@
+import yaml
+import json
+
+# 載入 YAML
+def load_yaml(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+# 載入 JSON
+def load_json(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+# 深層合併 dict 用於 allOf 合併
+def deep_merge(a, b):
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return b
+    result = dict(a)
+    for k, v in b.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+# 遞迴展開所有 schema 結構（含 $ref, allOf, items, properties...）
+def expand_schema(schema, definitions, seen_refs=None):
+    if seen_refs is None:
+        seen_refs = set()
+
+    if not isinstance(schema, dict):
+        return schema
+
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        if ref_name in seen_refs:
+            return {}
+        seen_refs.add(ref_name)
+        return expand_schema(definitions.get(ref_name, {}), definitions, seen_refs)
+
+    if "allOf" in schema:
+        merged = {}
+        for sub_schema in schema["allOf"]:
+            expanded = expand_schema(sub_schema, definitions, seen_refs.copy())
+            merged = deep_merge(merged, expanded)
+        return expand_schema(merged, definitions, seen_refs)
+
+    if schema.get("type") == "object" and "properties" in schema:
+        for k, v in schema["properties"].items():
+            schema["properties"][k] = expand_schema(v, definitions, seen_refs.copy())
+
+    if "items" in schema:
+        schema["items"] = expand_schema(schema["items"], definitions, seen_refs.copy())
+
+    if "additionalProperties" in schema:
+        schema["additionalProperties"] = expand_schema(schema["additionalProperties"], definitions, seen_refs.copy())
+
+    return schema
+
+# 比對 JSON 與 YAML Schema
+
+def compare_keys(schema, json_data, definitions, path="MdeBatchFile", debug=False):
+    missing_keys = []
+    extra_keys = []
+
+    schema = expand_schema(schema, definitions)
+    schema_type = schema.get("type")
+
+    if schema_type == "object":
+        props = schema.get("properties", {})
+        required = schema.get("required", [])
+
+        for key, val in props.items():
+            yaml_path = f"{path}.{key}"
+            if debug:
+                print(f"Checking: {yaml_path}")
+            if key not in json_data:
+                if key in required:
+                    missing_keys.append(yaml_path + " (Missing, Required)")
+                else:
+                    missing_keys.append(yaml_path + " (Missing)")
+            else:
+                sub_missing, sub_extra = compare_keys(val, json_data[key], definitions, yaml_path, debug)
+                missing_keys.extend(sub_missing)
+                extra_keys.extend(sub_extra)
+
+        if isinstance(json_data, dict):
+            for k in json_data:
+                if k not in props and "additionalProperties" not in schema:
+                    extra_keys.append(f"{path}.{k} (Extra)")
+
+        if "additionalProperties" in schema and isinstance(json_data, dict):
+            for k in json_data:
+                if k not in props:
+                    sub_missing, sub_extra = compare_keys(schema["additionalProperties"], json_data[k], definitions, f"{path}.{k}", debug)
+                    missing_keys.extend(sub_missing)
+                    extra_keys.extend(sub_extra)
+
+            # ✅ 若是空物件，additionalProperties 仍需展開補 missing keys
+            if not json_data:
+                add_schema = expand_schema(schema["additionalProperties"], definitions)
+                add_props = add_schema.get("properties", {})
+                for k in add_props:
+                    missing_keys.append(f"{path}.{k} (Missing from additionalProperties)")
+
+    elif schema_type == "array":
+        item_schema = schema.get("items", {})
+        if isinstance(json_data, list):
+            for idx, item in enumerate(json_data):
+                sub_missing, sub_extra = compare_keys(item_schema, item, definitions, f"{path}[{idx}]", debug)
+                missing_keys.extend(sub_missing)
+                extra_keys.extend(sub_extra)
+        else:
+            missing_keys.append(f"{path} (Expected Array)")
+
+    return missing_keys, extra_keys
+
+# QA 比對流程
+
+def qa_check(yaml_file, json_file, output_file="qa_result.txt", debug=False):
+    yaml_data = load_yaml(yaml_file)
+    json_data = load_json(json_file)
+
+    definitions = yaml_data.get("definitions", {})
+    root_schema = expand_schema(definitions.get("MdeBatchFile", {}), definitions)
+    json_section = json_data.get("/batches/MdeBatchFile", {}).get("get", {}).get("200", {})
+
+    missing_keys, extra_keys = compare_keys(root_schema, json_section, definitions, path="MdeBatchFile", debug=debug)
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write("=== Missing Fields in JSON ===\n")
+        for key in sorted(set(missing_keys)):
+            f.write(f"- {key}\n")
+
+        f.write("\n=== Extra Fields in JSON ===\n")
+        for key in sorted(set(extra_keys)):
+            f.write(f"- {key}\n")
+
+    print(f"✅ QA 結果已儲存於 {output_file}")
+
+# 使用範例
+qa_check("lcp-mde 1.yaml", "simplified_medata.json", debug=True)
