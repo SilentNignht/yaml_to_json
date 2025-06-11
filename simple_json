@@ -1,0 +1,66 @@
+import json
+
+# 載入 medata.json
+with open('medata.json', 'r', encoding='utf-8') as f:
+    full_spec = json.load(f)
+
+# 單一簡化函數：完整展開巢狀結構
+def simplify_schema(schema):
+    if isinstance(schema, dict):
+        simplified = {}
+
+        # 判斷是否是僅有 type/enum/format 的描述性結構
+        if "type" in schema and all(key in ["type", "enum", "format"] for key in schema.keys()):
+            if "enum" in schema:
+                enum_values = schema.get("enum", [])
+                return enum_values[0] if enum_values else "enum_value"
+            elif "format" in schema:
+                return schema["format"]
+            else:
+                return schema["type"]
+
+        # 一般字典展開
+        for key, value in schema.items():
+            if isinstance(value, dict):
+                simplified[key] = simplify_schema(value)
+
+            elif isinstance(value, list):
+                # 檢查陣列中的物件
+                simplified[key] = []
+                for item in value:
+                    if isinstance(item, dict):
+                        # 若是描述性結構（只有 type/enum/format）
+                        if "type" in item and all(k in ["type", "enum", "format"] for k in item.keys()):
+                            if "enum" in item:
+                                enum_values = item.get("enum", [])
+                                simplified[key].append(enum_values[0] if enum_values else "enum_value")
+                            elif "format" in item:
+                                simplified[key].append(item["format"])
+                            else:
+                                simplified[key].append(item["type"])
+                        else:
+                            # 若非描述性結構，完整展開
+                            simplified[key].append(simplify_schema(item))
+                    else:
+                        simplified[key].append("string")
+
+            else:
+                simplified[key] = "string"
+
+        return simplified
+
+    elif isinstance(schema, list):
+        # 直接簡化 list 中的每個項目
+        return [simplify_schema(item) for item in schema]
+
+    else:
+        return "string"
+
+# 簡化 JSON 結構
+final_simplified = simplify_schema(full_spec)
+
+# 輸出簡化的 JSON
+with open('simplified_medata.json', 'w', encoding='utf-8') as f:
+    json.dump(final_simplified, f, indent=2, ensure_ascii=False)
+
+print("✅ 簡化的 JSON 已輸出為 simplified_medata.json")
